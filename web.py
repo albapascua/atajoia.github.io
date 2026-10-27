@@ -1,0 +1,352 @@
+"""
+web.py - Genera y publica la web de El Archivo Curioso (albapascua.github.io).
+
+Uso:
+    python web.py generar     Rehace la web a partir de datos/expedientes.json
+    python web.py publicar    Genera la web y la sube a GitHub (git commit + push)
+
+Para añadir un vídeo o Short, añade una entrada a datos/expedientes.json:
+    {
+      "youtube": "ID del vídeo",
+      "tipo": "video" | "short",
+      "titulo": "...",
+      "fecha": "AAAA-MM-DD",            fecha de publicación en YouTube
+      "epoca": "1518",                  opcional
+      "lugar": "Estrasburgo",           opcional
+      "resumen": "2-3 frases",
+      "curiosidades": ["...", "..."],
+      "fuentes": [{"titulo": "...", "url": "https://..."}],
+      "etiquetas": ["..."]              opcional
+    }
+Las entradas con fecha futura no se muestran hasta ese día (vídeos programados).
+Solo usa la biblioteca estándar de Python.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import shutil
+import subprocess
+import sys
+import unicodedata
+from datetime import date
+from html import escape
+from pathlib import Path
+
+WEB = Path(__file__).resolve().parent
+DATOS = WEB / "datos" / "expedientes.json"
+LOGO_ORIGEN = WEB.parent / "Identidad" / "Archivo Curioso" / "foto-perfil.png"
+MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
+         "septiembre", "octubre", "noviembre", "diciembre"]
+
+CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,700;0,900;1,700&family=Special+Elite&family=Lora:ital,wght@0,500;0,700;1,500&display=swap');
+:root { --tinta:#1A1410; --tinta-2:#2A211A; --tinta-3:#362B22; --pergamino:#EBDDBF; --pergamino-2:#C9B48A;
+        --sepia:#6B4F35; --lacre:#9E2B25; --lacre-claro:#C2443B; --oro:#C8A04A; }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:'Lora',Georgia,serif; color:var(--pergamino); line-height:1.6; min-height:100vh;
+  background: radial-gradient(ellipse 80% 50% at 50% 0%, rgba(200,160,74,.12), transparent 70%),
+              repeating-linear-gradient(0deg, rgba(255,255,255,.012) 0 2px, transparent 2px 6px), var(--tinta); }
+a { color:var(--oro); }
+.ancho { max-width:1100px; margin:0 auto; padding:0 16px; }
+.etiqueta { font-family:'Special Elite','Courier New',monospace; letter-spacing:.16em; color:var(--oro); font-size:14px; text-transform:uppercase; }
+
+/* Sello de lacre */
+.sello { --t:64px; position:relative; flex:none; width:var(--t); height:var(--t); border-radius:50%;
+  background: radial-gradient(circle at 35% 30%, rgba(255,255,255,.25), transparent 35%),
+              radial-gradient(circle at 50% 50%, var(--lacre-claro) 0 55%, var(--lacre) 75%, #6E1C18 100%);
+  box-shadow:0 0 0 calc(var(--t)*.035) #7C211C, 0 calc(var(--t)*.06) calc(var(--t)*.12) rgba(0,0,0,.55);
+  display:flex; align-items:center; justify-content:center; text-decoration:none; }
+.sello::after { content:""; position:absolute; inset:calc(var(--t)*.1); border-radius:50%; border:calc(var(--t)*.025) solid rgba(60,10,8,.45); }
+.sello span { font-family:'Playfair Display',Georgia,serif; font-weight:900; font-style:italic; font-size:calc(var(--t)*.4); color:#F3D9C2; letter-spacing:-.04em; }
+
+/* Cabecera */
+header { border-bottom:1px solid rgba(201,180,138,.15); }
+header .ancho { display:flex; align-items:center; gap:14px; padding-top:18px; padding-bottom:18px; }
+header .nombre { font-family:'Playfair Display',Georgia,serif; font-weight:900; font-size:24px; color:var(--pergamino); text-decoration:none; line-height:1.1; }
+header .nombre em { color:var(--lacre-claro); }
+header nav { margin-left:auto; display:flex; gap:18px; flex-wrap:wrap; }
+header nav a { color:var(--pergamino-2); text-decoration:none; font-weight:700; font-size:15px; }
+header nav a:hover { color:var(--oro); }
+
+/* Portada */
+.portada { text-align:center; padding:72px 0 40px; display:flex; flex-direction:column; align-items:center; gap:18px; }
+.portada .sello { --t:120px; }
+.portada h1 { font-family:'Playfair Display',Georgia,serif; font-weight:900; font-size:clamp(40px,8vw,76px); line-height:1; }
+.portada h1 em { color:var(--lacre-claro); }
+.portada .lema { font-style:italic; font-size:clamp(18px,3vw,24px); color:rgba(235,221,191,.85); }
+.portada p.desc { max-width:640px; color:var(--pergamino-2); font-size:17px; }
+.boton { display:inline-block; padding:12px 26px; border-radius:6px; background:var(--lacre); color:#F3D9C2;
+  font-family:'Special Elite','Courier New',monospace; letter-spacing:.08em; text-decoration:none; font-size:16px;
+  box-shadow:0 0 0 1px #7C211C, 0 8px 20px rgba(0,0,0,.4); }
+.boton:hover { background:var(--lacre-claro); }
+
+/* Filtros y fichas */
+.filtros { display:flex; gap:10px; justify-content:center; margin:8px 0 28px; flex-wrap:wrap; }
+.filtros button { font-family:'Special Elite','Courier New',monospace; letter-spacing:.08em; font-size:14px; cursor:pointer;
+  padding:8px 16px; border-radius:4px; border:1px solid rgba(201,180,138,.35); background:transparent; color:var(--pergamino-2); }
+.filtros button.activo { background:var(--pergamino); color:var(--tinta); border-color:var(--pergamino); }
+.rejilla { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:22px; padding-bottom:64px; }
+.ficha { display:flex; flex-direction:column; background:var(--tinta-2); border:1px solid rgba(201,180,138,.18); border-radius:8px;
+  overflow:hidden; text-decoration:none; color:inherit; transition:transform .15s, border-color .15s; }
+.ficha:hover { transform:translateY(-3px); border-color:var(--oro); }
+.ficha .img { position:relative; aspect-ratio:16/9; background:var(--tinta-3) center/cover no-repeat; }
+.ficha .tipo { position:absolute; left:10px; top:10px; padding:3px 9px; border-radius:3px; font-family:'Special Elite',monospace;
+  font-size:12px; letter-spacing:.1em; background:var(--lacre); color:#F3D9C2; }
+.ficha .tipo.short { background:var(--oro); color:var(--tinta); }
+.ficha .txt { padding:14px 16px 18px; display:flex; flex-direction:column; gap:6px; }
+.ficha h3 { font-family:'Playfair Display',Georgia,serif; font-size:19px; line-height:1.25; color:var(--pergamino); }
+.ficha .meta { font-size:13px; color:var(--pergamino-2); }
+.vacio { text-align:center; padding:40px 16px 80px; color:var(--pergamino-2); }
+.vacio .sello { --t:72px; margin:0 auto 18px; opacity:.85; }
+
+/* Página de expediente */
+.expediente { padding:40px 0 72px; }
+.volver { text-decoration:none; font-weight:700; font-size:15px; }
+.expediente h1 { font-family:'Playfair Display',Georgia,serif; font-weight:900; font-size:clamp(30px,5.5vw,48px); line-height:1.1; margin:16px 0 14px; }
+.datos { display:flex; flex-wrap:wrap; gap:8px 22px; margin-bottom:26px; font-family:'Special Elite',monospace; font-size:14px; color:var(--pergamino-2); letter-spacing:.04em; }
+.datos b { color:var(--oro); font-weight:400; }
+.video { position:relative; width:100%; aspect-ratio:16/9; border-radius:8px; overflow:hidden; background:#000; box-shadow:0 20px 50px rgba(0,0,0,.5); }
+.video.short { max-width:360px; aspect-ratio:9/16; margin:0 auto; }
+.video iframe { position:absolute; inset:0; width:100%; height:100%; border:0; }
+.bloque { margin-top:36px; }
+.bloque h2 { font-family:'Playfair Display',Georgia,serif; font-size:26px; margin-bottom:12px; color:var(--pergamino); }
+.bloque p { font-size:18px; }
+.curiosidades { list-style:none; display:flex; flex-direction:column; gap:12px; }
+.curiosidades li { position:relative; padding:14px 16px 14px 52px; background:var(--tinta-2); border-left:3px solid var(--lacre); border-radius:4px; font-size:17px; }
+.curiosidades li::before { content:counter(c); counter-increment:c; position:absolute; left:14px; top:12px; font-family:'Playfair Display',serif; font-weight:900; font-size:22px; color:var(--oro); }
+.curiosidades { counter-reset:c; }
+.fuentes li { margin:6px 0 6px 20px; }
+.etiquetas { display:flex; flex-wrap:wrap; gap:8px; }
+.etiquetas span { font-family:'Special Elite',monospace; font-size:13px; padding:4px 10px; border:1px solid rgba(201,180,138,.3); border-radius:3px; color:var(--pergamino-2); }
+.navegacion { display:flex; justify-content:space-between; gap:16px; margin-top:48px; flex-wrap:wrap; }
+.navegacion a { text-decoration:none; font-weight:700; max-width:48%; }
+
+/* Texto legal */
+.legal { padding:40px 0 72px; max-width:760px; }
+.legal h1 { font-family:'Playfair Display',Georgia,serif; font-size:clamp(30px,6vw,44px); margin:16px 0 6px; }
+.legal .fecha { font-size:14px; color:var(--pergamino-2); margin-bottom:24px; }
+.legal h2 { color:var(--oro); font-family:'Playfair Display',Georgia,serif; font-size:21px; margin:28px 0 8px; }
+.legal p, .legal li { font-size:16px; }
+.legal ul { padding-left:22px; }
+
+footer { border-top:1px solid rgba(201,180,138,.15); padding:24px 16px; text-align:center; font-size:14px; color:rgba(235,221,191,.6); }
+footer a { color:rgba(235,221,191,.8); }
+@media (max-width:600px) { header nav { display:none; } }
+"""
+
+FILTRO_JS = """
+<script>
+document.querySelectorAll('.filtros button').forEach(function (b) {
+  b.addEventListener('click', function () {
+    document.querySelectorAll('.filtros button').forEach(function (x) { x.classList.remove('activo'); });
+    b.classList.add('activo');
+    var f = b.dataset.filtro;
+    document.querySelectorAll('.ficha').forEach(function (c) {
+      c.style.display = (f === 'todos' || c.dataset.tipo === f) ? '' : 'none';
+    });
+  });
+});
+</script>
+"""
+
+
+def fecha_larga(iso: str) -> str:
+    d = date.fromisoformat(iso[:10])
+    return f"{d.day} de {MESES[d.month - 1]} de {d.year}"
+
+
+def slug(texto: str) -> str:
+    t = unicodedata.normalize("NFKD", texto).encode("ascii", "ignore").decode()
+    t = re.sub(r"[^a-zA-Z0-9]+", "-", t.lower()).strip("-")
+    return t[:70].rstrip("-") or "expediente"
+
+
+def pagina(titulo: str, cuerpo: str, canal: dict, raiz: str = "", descripcion: str = "", extra: str = "") -> str:
+    desc = escape(descripcion or canal["lema"])
+    return f"""<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{escape(titulo)}</title>
+<meta name="description" content="{desc}">
+<link rel="icon" href="{raiz}logo.png">
+<style>{CSS}</style>
+</head>
+<body>
+<header><div class="ancho">
+  <a class="sello" style="--t:46px" href="{raiz}index.html" aria-label="Inicio"><span>AC</span></a>
+  <a class="nombre" href="{raiz}index.html">El Archivo <em>Curioso</em></a>
+  <nav><a href="{raiz}index.html#expedientes">Expedientes</a><a href="{escape(canal['youtube'])}">YouTube</a></nav>
+</div></header>
+{cuerpo}
+<footer>© {date.today().year} {escape(canal['nombre'])} · <a href="{raiz}privacidad.html">Política de privacidad</a></footer>
+{extra}
+</body>
+</html>
+"""
+
+
+def ficha(e: dict) -> str:
+    tipo = "short" if e.get("tipo") == "short" else "video"
+    meta = " · ".join(x for x in (e.get("epoca", ""), e.get("lugar", ""), fecha_larga(e["fecha"])) if x)
+    return (f'<a class="ficha" data-tipo="{tipo}" href="expedientes/{e["_slug"]}.html">'
+            f'<div class="img" style="background-image:url(https://i.ytimg.com/vi/{escape(e["youtube"])}/hqdefault.jpg)">'
+            f'<span class="tipo {tipo}">{"SHORT" if tipo == "short" else "VÍDEO"}</span></div>'
+            f'<div class="txt"><h3>{escape(e["titulo"])}</h3><div class="meta">{escape(meta)}</div></div></a>')
+
+
+def inicio(canal: dict, expedientes: list[dict]) -> str:
+    if expedientes:
+        lista = ('<div class="filtros"><button class="activo" data-filtro="todos">TODOS</button>'
+                 '<button data-filtro="video">VÍDEOS</button><button data-filtro="short">SHORTS</button></div>'
+                 f'<div class="rejilla">{"".join(ficha(e) for e in expedientes)}</div>')
+    else:
+        lista = ('<div class="vacio"><div class="sello"><span>AC</span></div>'
+                 '<p>Los primeros expedientes se están catalogando.<br>Muy pronto los encontrarás aquí.</p></div>')
+    cuerpo = f"""<main class="ancho">
+<section class="portada">
+  <div class="sello"><span>AC</span></div>
+  <div class="etiqueta">Expedientes de historia y curiosidades</div>
+  <h1>El Archivo <em>Curioso</em></h1>
+  <div class="lema">{escape(canal['lema'])}</div>
+  <p class="desc">{escape(canal['descripcion'])}</p>
+  <a class="boton" href="{escape(canal['youtube'])}">VER EL CANAL EN YOUTUBE</a>
+</section>
+<section id="expedientes">
+  <div class="etiqueta" style="text-align:center; margin-bottom:12px">Expedientes abiertos: {len(expedientes)}</div>
+  {lista}
+</section>
+</main>"""
+    return pagina(canal["nombre"], cuerpo, canal, extra=FILTRO_JS if expedientes else "")
+
+
+def expediente(e: dict, anterior: dict | None, siguiente: dict | None, canal: dict) -> str:
+    tipo = "short" if e.get("tipo") == "short" else "video"
+    datos = "".join(f"<span><b>{k}:</b> {escape(v)}</span>" for k, v in (
+        ("Época", e.get("epoca", "")), ("Lugar", e.get("lugar", "")), ("Publicado", fecha_larga(e["fecha"])),
+        ("Formato", "Short" if tipo == "short" else "Vídeo")) if v)
+    bloques = f'<div class="bloque"><h2>El caso</h2><p>{escape(e["resumen"])}</p></div>' if e.get("resumen") else ""
+    if e.get("curiosidades"):
+        bloques += ('<div class="bloque"><h2>Curiosidades del expediente</h2><ul class="curiosidades">'
+                    + "".join(f"<li>{escape(c)}</li>" for c in e["curiosidades"]) + "</ul></div>")
+    if e.get("fuentes"):
+        bloques += ('<div class="bloque"><h2>Fuentes</h2><ul class="fuentes">'
+                    + "".join(f'<li><a href="{escape(f["url"])}" rel="noopener">{escape(f["titulo"])}</a></li>'
+                              for f in e["fuentes"]) + "</ul></div>")
+    if e.get("etiquetas"):
+        bloques += ('<div class="bloque etiquetas">'
+                    + "".join(f"<span>#{escape(t)}</span>" for t in e["etiquetas"]) + "</div>")
+    nav = '<div class="navegacion">'
+    nav += f'<a href="{anterior["_slug"]}.html">← {escape(anterior["titulo"])}</a>' if anterior else "<span></span>"
+    nav += f'<a href="{siguiente["_slug"]}.html" style="text-align:right">{escape(siguiente["titulo"])} →</a>' if siguiente else ""
+    nav += "</div>"
+    cuerpo = f"""<main class="ancho expediente">
+<a class="volver" href="../index.html#expedientes">← Todos los expedientes</a>
+<h1>{escape(e['titulo'])}</h1>
+<div class="datos">{datos}</div>
+<div class="video {tipo}"><iframe src="https://www.youtube-nocookie.com/embed/{escape(e['youtube'])}"
+  title="{escape(e['titulo'])}" loading="lazy" allowfullscreen
+  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"></iframe></div>
+<p style="margin-top:14px; text-align:center"><a href="https://www.youtube.com/watch?v={escape(e['youtube'])}">Ver en YouTube</a></p>
+{bloques}
+{nav}
+</main>"""
+    return pagina(f"{e['titulo']} · {canal['nombre']}", cuerpo, canal, raiz="../", descripcion=e.get("resumen", ""))
+
+
+def privacidad(canal: dict) -> str:
+    cuerpo = """<main class="ancho legal">
+<a class="volver" href="index.html">← Inicio</a>
+<h1>Política de privacidad</h1>
+<div class="fecha">Última actualización: 28 de octubre de 2026</div>
+<h2>1. Qué es esta herramienta</h2>
+<p>"Atajo IA scripts" es una herramienta de uso privado que utiliza la persona responsable del canal de YouTube El Archivo Curioso para gestionar su propio canal: subir sus vídeos, completar títulos, descripciones, miniaturas, subtítulos y listas de reproducción, y consultar las estadísticas y los comentarios del canal. No es una aplicación pública ni está pensada para que la usen otras personas.</p>
+<h2>2. Qué datos se usan</h2>
+<p>Con el permiso que concede la persona titular de la cuenta, la herramienta accede a través de la API de YouTube a:</p>
+<ul>
+  <li>La información del canal (nombre, descripción, imagen y estadísticas).</li>
+  <li>Los vídeos, listas de reproducción y subtítulos del canal.</li>
+  <li>Los comentarios públicos recibidos en el canal, solo para leerlos.</li>
+</ul>
+<h2>3. Cómo se guardan</h2>
+<ul>
+  <li>El permiso de acceso se guarda únicamente en el ordenador de la persona titular, en el gestor de credenciales del sistema.</li>
+  <li>Los datos se usan solo para gestionar el propio canal. No se venden, no se comparten con terceros y no se usan para publicidad.</li>
+  <li>La herramienta no recopila datos de los espectadores del canal.</li>
+</ul>
+<h2>4. Esta web</h2>
+<p>Esta web no usa cookies propias ni formularios. Los vídeos se muestran con el reproductor de YouTube en modo de privacidad mejorada (youtube-nocookie.com); al reproducirlos se aplica la política de privacidad de Google.</p>
+<h2>5. Servicios de Google</h2>
+<p>La herramienta usa los Servicios de la API de YouTube. Al ver el canal también se aplican las <a href="https://www.youtube.com/t/terms">Condiciones del Servicio de YouTube</a> y la <a href="https://policies.google.com/privacy">Política de Privacidad de Google</a>.</p>
+<p>El uso de la información recibida de las API de Google cumple la <a href="https://developers.google.com/terms/api-services-user-data-policy">Política de Datos de Usuario de los Servicios de las API de Google</a>, incluidos los requisitos de uso limitado.</p>
+<h2>6. Cómo retirar el acceso</h2>
+<p>El acceso puede retirarse en cualquier momento desde <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</p>
+<h2>7. Contacto</h2>
+<p>Para cualquier consulta sobre esta política, puedes escribir a través del <a href="CANAL">canal de YouTube</a>.</p>
+</main>""".replace("CANAL", escape(canal["youtube"]))
+    return pagina(f"Política de privacidad · {canal['nombre']}", cuerpo, canal)
+
+
+def generar() -> int:
+    datos = json.loads(DATOS.read_text(encoding="utf-8-sig"))  # acepta archivos con o sin BOM
+    canal = datos["canal"]
+    hoy = date.today().isoformat()
+    visibles = [e for e in datos["expedientes"] if e["fecha"][:10] <= hoy]
+    visibles.sort(key=lambda e: e["fecha"], reverse=True)
+
+    usados: set[str] = set()
+    for e in visibles:
+        s = e.get("slug") or slug(e["titulo"])
+        while s in usados:
+            s += "-" + e["youtube"][:4].lower()
+        e["_slug"] = s
+        usados.add(s)
+
+    dir_exp = WEB / "expedientes"
+    if dir_exp.exists():
+        shutil.rmtree(dir_exp)
+    dir_exp.mkdir()
+    for i, e in enumerate(visibles):
+        anterior = visibles[i + 1] if i + 1 < len(visibles) else None   # más antiguo
+        siguiente = visibles[i - 1] if i > 0 else None                  # más reciente
+        (dir_exp / f"{e['_slug']}.html").write_text(expediente(e, anterior, siguiente, canal), encoding="utf-8")
+
+    (WEB / "index.html").write_text(inicio(canal, visibles), encoding="utf-8")
+    (WEB / "privacidad.html").write_text(privacidad(canal), encoding="utf-8")
+    (WEB / ".nojekyll").write_text("", encoding="utf-8")
+    if LOGO_ORIGEN.exists():
+        shutil.copyfile(LOGO_ORIGEN, WEB / "logo.png")
+    ocultos = len(datos["expedientes"]) - len(visibles)
+    print(f"Web generada: {len(visibles)} expedientes publicados" + (f", {ocultos} programados para más adelante" if ocultos else ""))
+    return len(visibles)
+
+
+def git(*args: str) -> subprocess.CompletedProcess:
+    exe = shutil.which("git") or r"C:\Program Files\Git\cmd\git.exe"
+    return subprocess.run([exe, *args], cwd=WEB, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def publicar() -> None:
+    generar()
+    git("add", "-A")
+    if not git("status", "--porcelain").stdout.strip():
+        print("No hay cambios que subir.")
+        return
+    r = git("commit", "-m", f"Actualizar web ({date.today().isoformat()})\n\n"
+                              "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>")
+    if r.returncode != 0:
+        sys.exit(f"ERROR en git commit:\n{r.stderr}")
+    r = git("push")
+    if r.returncode != 0:
+        sys.exit(f"ERROR en git push (¿hay que volver a autorizar GitHub?):\n{r.stderr}")
+    print("Web publicada en https://albapascua.github.io (tarda 1-2 minutos en actualizarse).")
+
+
+if __name__ == "__main__":
+    comandos = {"generar": generar, "publicar": publicar}
+    if len(sys.argv) != 2 or sys.argv[1] not in comandos:
+        sys.exit("Uso: python web.py generar | publicar")
+    comandos[sys.argv[1]]()
